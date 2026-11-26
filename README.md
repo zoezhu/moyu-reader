@@ -1,6 +1,6 @@
-# JSON Workbench
+# 摸鱼阅读器（Moyu Reader）
 
-一个看起来像代码编辑器的本地阅读器。支持 TXT、EPUB 和文字版 PDF，正文放在 JSON 的 `default` 字段里，内容不会被改写。
+把书藏进代码里的本地阅读器。支持 TXT、EPUB 和文字版 PDF，以代码编辑器和 JSON 的形式展示原文。
 
 ![JSON Workbench 界面预览](docs/screenshot.jpg)
 
