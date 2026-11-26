@@ -1,4 +1,6 @@
 import { CircleHelp } from 'lucide-react';
+import { FormatSelect } from './DisplayFormatControls';
+import { getDisplayFormat } from './lib/display-formats';
 import { READING_SHORTCUTS, readingKeyFromEvent, readingKeyLabel } from './lib/reading-shortcut';
 import type { ReaderSettings } from './types';
 
@@ -21,8 +23,12 @@ export function ReaderSettingsPanel({ settings, onChange, onShortcutChange, noti
     <div className="modal-content">
       <div className="settings-section">
         <h3>编辑器</h3>
+        <div className="settings-row">
+          <span><strong>显示格式</strong><small>{getDisplayFormat(settings.displayFormat).description}。切换时保留阅读位置。</small></span>
+          <FormatSelect value={settings.displayFormat} onChange={displayFormat => onChange({ displayFormat })} />
+        </div>
         <label className="settings-row">
-          <span><strong>文字大小</strong><small>正文与其他 JSON 字符串保持一致</small></span>
+          <span><strong>文字大小</strong><small>正文与周围工作内容使用相同字号</small></span>
           <span className="font-setting">
             <input
               className="range-input"
@@ -37,7 +43,7 @@ export function ReaderSettingsPanel({ settings, onChange, onShortcutChange, noti
           </span>
         </label>
         <label className="settings-row">
-          <span><strong>阅读节奏</strong><small>正文保持短 default，段间留出配置间隔</small></span>
+          <span><strong>阅读节奏</strong><small>各格式共用短正文片段和工作内容间隔</small></span>
           <select
             className="select-input"
             aria-label="阅读节奏"
@@ -46,7 +52,7 @@ export function ReaderSettingsPanel({ settings, onChange, onShortcutChange, noti
           >
             <option value="comfortable">阅读优先</option>
             <option value="sparse">均衡穿插</option>
-            <option value="extra-sparse">配置较多</option>
+            <option value="extra-sparse">工作内容较多</option>
           </select>
         </label>
         {READING_SHORTCUTS.map(shortcut => (

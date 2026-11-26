@@ -1,12 +1,12 @@
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
 import { Compartment, EditorState } from '@codemirror/state';
 import { EditorView, drawSelection, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from '@codemirror/view';
-import { bracketMatching, foldEffect, foldedRanges, foldGutter, syntaxHighlighting, unfoldAll } from '@codemirror/language';
+import { bracketMatching, foldEffect, foldedRanges, foldGutter, unfoldAll } from '@codemirror/language';
 import { defaultKeymap } from '@codemirror/commands';
 import { closeSearchPanel, openSearchPanel, search, searchKeymap } from '@codemirror/search';
-import { json } from '@codemirror/lang-json';
-import { editorHighlight, editorTheme } from './editor-theme';
-import { sourceOffsetToJsonOffset } from './lib/text-position';
+import { editorTheme } from './editor-theme';
+import { sourceOffsetToEncodedOffset } from './lib/text-position';
+import { editorLanguage, formatPresentation } from './lib/editor-language';
 import { readingWhitespace } from './lib/reading-whitespace';
 import { readingCharacters, type ReadingCharacter } from './lib/reading-characters';
 import type { DocumentModel, ReadingDirection, ReadingSlot } from './types';
@@ -17,9 +17,11 @@ export interface NavigationTarget {
   chunkIndex: number;
   mode: 'read' | 'anchor';
   delta?: number;
-  /** Original UTF-16 position; maps to a visual row within a wrapped JSON string. */
+  /** Original UTF-16 position; maps to a visual row in any display format. */
   sourceOffset?: number;
   alignTop?: boolean;
+  /** Keep an exact in-slot bookmark against the top when changing display modes. */
+  restoreTop?: boolean;
   readingDirection?: ReadingDirection;
 }
 export interface JsonEditorHandle {
@@ -64,6 +66,7 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
   const current = useRef(props);
   const compartment = useRef(new Compartment());
   const readingPresentation = useRef(new Compartment());
+  const language = useRef(new Compartment());
   const suppressUntil = useRef(0);
   const parked = useRef(false);
   const parkingReturn = useRef<{
@@ -85,6 +88,7 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
   const readingQueueFrame = useRef(0);
   const movementMeasureKey = useRef({});
   const parkingMeasureKey = useRef({});
+  const gutterMeasureKey = useRef({});
   const readingAlignment = useRef<{ model: DocumentModel; position: number; scrollTop: number } | null>(null);
   const characterCache = useRef<{ model: DocumentModel; slots: Map<ReadingSlot, ReadingCharacter[]> } | null>(null);
   current.current = props;
@@ -94,7 +98,7 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
     const cache = characterCache.current.slots;
     let characters = cache.get(slot);
     if (!characters) {
-      characters = readingCharacters(model.text.slice(slot.from, slot.to), slot.from, slot.sourceStart);
+      characters = readingCharacters(model.text.slice(slot.from, slot.to), slot.from, slot.sourceStart, slot.encoding);
       cache.set(slot, characters);
     }
     return characters;
@@ -111,6 +115,24 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
 
   const validView = (editor: EditorView, token: number) =>
     view.current === editor && movement.current === token && latestModel.current === current.current.model;
+
+  const syncDatasetGutter = (editor: EditorView) => {
+    if (current.current.model.format !== 'dataset') return;
+    const model = current.current.model;
+    editor.requestMeasure({
+      key: gutterMeasureKey.current,
+      read: () => {
+        if (view.current !== editor || latestModel.current !== model || current.current.model !== model) return null;
+        const column = host.current?.closest<HTMLElement>('.editor-column');
+        const gutters = editor.dom.querySelector<HTMLElement>('.cm-gutters');
+        return column && gutters ? { column, width: `${gutters.getBoundingClientRect().width / editor.scaleX}px` } : null;
+      },
+      write: result => {
+        if (!result || view.current !== editor || latestModel.current !== model || current.current.model !== model) return;
+        if (result.column.style.getPropertyValue('--dataset-gutter') !== result.width) result.column.style.setProperty('--dataset-gutter', result.width);
+      },
+    });
+  };
 
   const clearReadingQueue = () => {
     queuedReadingSteps.current = [];
@@ -155,6 +177,11 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
   const isSlotVisible = (editor: EditorView, from: number, to: number) =>
     editor.visibleRanges.some(range => from < range.to && to > range.from);
 
+  const slotBounds = (editor: EditorView, slot: ReadingSlot) => ({
+    top: editor.lineBlockAt(slot.from).top,
+    bottom: editor.lineBlockAt(Math.max(slot.from, slot.to - 1)).bottom,
+  });
+
   const getAnchor = (): EditorAnchor | null => {
     const editor = view.current;
     const model = latestModel.current;
@@ -191,7 +218,7 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
           ?? zones.sort((a, b) => Math.abs((a.start + a.end) / 2 - top - height / 2) - Math.abs((b.start + b.end) / 2 - top - height / 2))[0];
         const storyVisible = model.slots.some(slot => {
           if (!isSlotVisible(editor, slot.from, slot.to)) return false;
-          const block = editor.lineBlockAt(slot.from);
+          const block = slotBounds(editor, slot);
           return block.bottom > top && block.top < bottom;
         });
         const inside = top >= selected.minTop && top <= selected.maxTop && !storyVisible;
@@ -234,10 +261,10 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
         // Folded text shares a visible block with its placeholder, but must not
         // count as a visible reading paragraph or advance the saved position.
         if (!isSlotVisible(editor, slot.from, slot.to)) continue;
-        const block = editor.lineBlockAt(editor.state.doc.line(Math.min(slot.line, editor.state.doc.lines)).from);
+        const block = slotBounds(editor, slot);
         if (block.bottom >= top + 6 && block.top < bottom - 10) {
           // Read the first visible source character rather than the logical
-          // JSON line's beginning. This also handles soft wraps and inline br
+          // slot's beginning. This also handles soft wraps and inline br
           // widgets whose second visual row is exactly against the top edge.
           const screenTop = editor.scrollDOM.getBoundingClientRect().top + editor.scrollDOM.clientTop;
           const screenBottom = screenTop + editor.scrollDOM.clientHeight * editor.scaleY;
@@ -258,7 +285,7 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
     if (scroll.scrollHeight <= scroll.clientHeight + 8) return;
     // Chapter-scoped documents may only load another window within that chapter.
     const lastSlot = model.slots.at(-1);
-    const passedLastReadingSlot = !lastSlot || editor.lineBlockAt(lastSlot.from).bottom <= top;
+    const passedLastReadingSlot = !lastSlot || slotBounds(editor, lastSlot).bottom <= top;
     const forward = passedLastReadingSlot && scroll.scrollTop + scroll.clientHeight > scroll.scrollHeight - 650
       && model.windowEnd < (model.rangeEnd ?? model.totalChunks);
     const firstSlot = model.slots[0];
@@ -369,11 +396,11 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
     const slots = direction > 0 ? model.slots : [...model.slots].reverse();
     for (const slot of slots) {
       if (alignedSlot) {
-        // One key press advances one JSON value, never a soft-wrapped row
+        // One key press advances one source slot, never a soft-wrapped row
         // inside the value that is already aligned at the top.
         if ((slot.chunkIndex - alignedSlot.chunkIndex) * direction <= 0) continue;
       } else {
-        const block = editor.lineBlockAt(slot.from);
+        const block = slotBounds(editor, slot);
         // After a manual scroll, include a partially visible value so its
         // first line is restored before subsequent presses advance onward.
         const top = viewport(editor).top;
@@ -420,13 +447,16 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
         doc: current.current.model.text,
         extensions: [
           lineNumbers(), highlightActiveLineGutter(), foldGutter(), drawSelection(), highlightActiveLine(),
-          bracketMatching(), json(), syntaxHighlighting(editorHighlight),
+          bracketMatching(), language.current.of(editorLanguage(current.current.model.format)),
           EditorState.readOnly.of(true), EditorView.editable.of(false), EditorView.lineWrapping,
-          EditorView.contentAttributes.of({ 'aria-label': 'JSON 内容', spellcheck: 'false', tabindex: '0' }),
+          // Splitting on LF alone keeps CRLF source offsets identical to the model.
+          EditorState.lineSeparator.of('\n'),
           search({ top: true }), keymap.of([...searchKeymap, ...defaultKeymap]),
           compartment.current.of(editorTheme(current.current.fontSize)),
-          readingPresentation.current.of(readingWhitespace(current.current.model)),
+          readingPresentation.current.of([readingWhitespace(current.current.model), formatPresentation(current.current.model)]),
           EditorView.updateListener.of(update => {
+            // Header alignment depends on geometry, never ordinary scrolling.
+            if (update.geometryChanged) syncDatasetGutter(update.view);
             if (update.viewportChanged || update.geometryChanged || update.selectionSet) scheduleReport();
           }),
         ],
@@ -434,6 +464,7 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
     });
     view.current = editor;
     latestModel.current = current.current.model;
+    syncDatasetGutter(editor);
     editor.scrollDOM.addEventListener('scroll', scheduleReport, { passive: true });
     return () => {
       movement.current++;
@@ -460,11 +491,16 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
     parkingReturn.current = null;
     parkingZone.current = null;
     if (latestModel.current !== props.model) {
+      const changedFormat = (latestModel.current?.format ?? 'json') !== (props.model.format ?? 'json');
       editor.dispatch({
         changes: { from: 0, to: editor.state.doc.length, insert: props.model.text },
-        effects: readingPresentation.current.reconfigure(readingWhitespace(props.model)),
+        effects: [
+          readingPresentation.current.reconfigure([readingWhitespace(props.model), formatPresentation(props.model)]),
+          ...(changedFormat ? [language.current.reconfigure(editorLanguage(props.model.format))] : []),
+        ],
       });
       latestModel.current = props.model;
+      syncDatasetGutter(editor);
     }
     const direction = props.target.readingDirection ?? 1;
     const slots = direction > 0 ? props.model.slots : [...props.model.slots].reverse();
@@ -491,16 +527,16 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
         : Math.max(slot.sourceStart, Math.min(slot.sourceEnd, props.target.sourceOffset ?? slot.sourceStart));
       const literal = editor.state.doc.sliceString(slot.from, slot.to);
       const position = props.target.alignTop
-        ? charactersIn(props.model, slot)[0]?.position ?? slot.from + 1
-        : slot.from + sourceOffsetToJsonOffset(literal, sourceOffset - slot.sourceStart);
+        ? charactersIn(props.model, slot)[0]?.position ?? slot.from
+        : slot.from + sourceOffsetToEncodedOffset(literal, sourceOffset - slot.sourceStart, slot.encoding);
       // For a bookmark inside a long block, align its visual row at the top.
       // Adding the usual context margin would reveal earlier prose and cause
       // the next progress report to repeatedly move the bookmark backwards.
-      const margin = props.target.alignTop || sourceOffset > slot.sourceStart ? 0 : editor.scrollDOM.clientHeight * 0.26;
+      const margin = props.target.alignTop || props.target.restoreTop || sourceOffset > slot.sourceStart ? 0 : editor.scrollDOM.clientHeight * 0.26;
       scrollToAnchor(editor, position, token, {
         delta: margin,
         alignment: 'glyph',
-        rememberReadingAnchor: props.target.alignTop,
+        rememberReadingAnchor: props.target.alignTop || props.target.restoreTop,
       });
     }
     return () => {
@@ -509,7 +545,11 @@ export const JsonEditor = forwardRef<JsonEditorHandle, Props>(function JsonEdito
   }, [props.model, props.target.key]);
 
   useEffect(() => {
-    view.current?.dispatch({ effects: compartment.current.reconfigure(editorTheme(props.fontSize)) });
+    const editor = view.current;
+    if (editor) {
+      editor.dispatch({ effects: compartment.current.reconfigure(editorTheme(props.fontSize)) });
+      syncDatasetGutter(editor);
+    }
   }, [props.fontSize]);
 
   useImperativeHandle(ref, () => ({

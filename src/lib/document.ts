@@ -1,5 +1,6 @@
 import templateData from '../data/config-template.json';
-import type { Book, Chapter, DocumentModel, ParkingZone, ReaderSettings, ReadingSection, ReadingSlot, TextChunk } from '../types';
+import type { Book, Chapter, DisplayFormat, DocumentModel, ParkingZone, ReaderSettings, ReadingSection, ReadingSlot, TextChunk } from '../types';
+import { formatDocument } from './format-document';
 
 type JsonObject = Record<string, unknown>;
 interface Configuration extends JsonObject {
@@ -260,6 +261,7 @@ interface RenderedRecord {
 }
 
 export interface DocumentOptions {
+  format?: DisplayFormat;
   start?: number;
   count?: number;
   /** Whole-book chunk bounds; rangeEnd is exclusive. */
@@ -383,5 +385,6 @@ export function buildDocument(book: Book, chunks: TextChunk[], options: Document
   }
   if (zoneStart <= lastLine) parkingZones.push({ startLine: zoneStart, endLine: lastLine });
 
-  return { text, slots, parkingZones, windowStart: start, windowEnd: end, totalChunks: chunks.length, rangeStart, rangeEnd };
+  const model: DocumentModel = { format: 'json', text, slots, parkingZones, windowStart: start, windowEnd: end, totalChunks: chunks.length, rangeStart, rangeEnd };
+  return options.format && options.format !== 'json' ? formatDocument(model, book, options.format) : model;
 }

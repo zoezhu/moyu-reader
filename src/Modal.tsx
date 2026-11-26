@@ -18,8 +18,9 @@ export function Modal({ title, children, footer, onClose, className = '' }: Prop
     const previous = document.activeElement as HTMLElement | null;
     const node = container.current;
     const focusables = () => Array.from(node?.querySelectorAll<HTMLElement>(
-      'button:not(:disabled), input:not(:disabled), select, [tabindex="0"]',
-    ) ?? []);
+      'button, input, select, textarea, a[href], [tabindex]',
+    ) ?? []).filter(element => element.tabIndex >= 0 && !element.matches(':disabled')
+      && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden');
     (node?.querySelector<HTMLElement>('[data-autofocus]') ?? focusables()[0])?.focus();
 
     const handleKeyDown = (event: KeyboardEvent) => {

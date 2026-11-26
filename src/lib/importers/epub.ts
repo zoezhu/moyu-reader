@@ -130,7 +130,9 @@ function readNav(source: string, navPath: string): Link[] {
   const links: Link[] = [];
   const walkList = (list: Element, level: number) => {
     for (const li of children(list, 'li')) {
-      const anchor = children(li, 'a')[0] ?? elements(li, 'a')[0];
+      // A span-only group has no destination of its own. Looking through its
+      // descendants steals the first child link and assigns it the wrong level.
+      const anchor = children(li, 'a')[0];
       if (anchor) {
         const target = resolveHref(navPath, anchor.getAttribute('href') ?? '');
         const title = anchor.textContent?.replace(/\s+/g, ' ').trim();
@@ -202,7 +204,11 @@ export async function parseEpub(bytes: Uint8Array, onProgress: ImportProgress): 
   }
   const spine = elements(packageDocument, 'spine')[0];
   if (!spine) throw new Error('EPUB 没有正文阅读顺序。');
-  const order = children(spine, 'itemref').filter((item) => item.getAttribute('linear') !== 'no').map((item) => manifest.get(item.getAttribute('idref') ?? '')).filter((entry): entry is Entry => !!entry);
+  const order = children(spine, 'itemref').filter((item) => item.getAttribute('linear') !== 'no').map((item) => {
+    const entry = manifest.get(item.getAttribute('idref') ?? '');
+    if (!entry) throw new Error('EPUB 正文清单缺少章节，无法完整读取。');
+    return entry;
+  });
   if (!order.length) throw new Error('EPUB 没有可读取的正文。');
 
   let text = '';

@@ -1,5 +1,6 @@
-import type { Book, ReadingProgress, ReaderSettings } from '../types';
+import type { Book, Chapter, ReadingProgress, ReaderSettings } from '../types';
 import { DEFAULT_READING_KEYS, normalizeReadingKeys } from './reading-shortcut';
+import { isDisplayFormat } from './display-formats';
 
 const DB_NAME = 'json-workbench-local';
 let connection: Promise<IDBDatabase> | undefined;
@@ -53,7 +54,35 @@ async function write(store: string, value: unknown): Promise<void> {
   });
 }
 
-export const getBooks = () => read<Book[]>('books');
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function nonnegativeNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+/** Stored data may come from an older build or an interrupted/manual migration. */
+function storedBook(value: unknown): Book | null {
+  if (!isRecord(value)
+    || typeof value.id !== 'string' || !value.id
+    || typeof value.name !== 'string' || typeof value.alias !== 'string'
+    || (value.format !== 'txt' && value.format !== 'epub' && value.format !== 'pdf')
+    || typeof value.text !== 'string'
+    || !nonnegativeNumber(value.importedAt) || !nonnegativeNumber(value.size)) return null;
+  const text = value.text;
+  const chapters = Array.isArray(value.chapters) ? value.chapters.filter((chapter): chapter is Chapter =>
+    isRecord(chapter) && typeof chapter.id === 'string' && typeof chapter.title === 'string'
+    && nonnegativeNumber(chapter.offset) && Number.isInteger(chapter.offset) && chapter.offset < text.length
+    && nonnegativeNumber(chapter.level) && Number.isInteger(chapter.level)) : [];
+  const warnings = Array.isArray(value.warnings) ? value.warnings.filter((warning) => typeof warning === 'string') : [];
+  return {
+    id: value.id, name: value.name, alias: value.alias, format: value.format,
+    text, importedAt: value.importedAt, size: value.size, chapters, warnings,
+  };
+}
+
+export const getBooks = async () => (await read<unknown[]>('books')).map(storedBook).filter((book): book is Book => book !== null);
 export const saveBook = (book: Book) => write('books', book);
 export async function deleteBook(id: string) {
   const db = await database();
@@ -67,11 +96,18 @@ export async function deleteBook(id: string) {
     transaction.onabort = () => reject(transaction.error ?? new Error('本地移除已中断'));
   });
 }
-export const getProgress = (bookId: string) => read<ReadingProgress | undefined>('progress', bookId);
+export async function getProgress(bookId: string): Promise<ReadingProgress | undefined> {
+  const value = await read<unknown>('progress', bookId);
+  if (!isRecord(value) || value.bookId !== bookId
+    || !nonnegativeNumber(value.sourceOffset) || !Number.isInteger(value.sourceOffset)
+    || !nonnegativeNumber(value.updatedAt)) return undefined;
+  return { bookId, sourceOffset: value.sourceOffset, updatedAt: value.updatedAt };
+}
 export const saveProgress = (progress: ReadingProgress) => write('progress', progress);
 
 export const defaultSettings: ReaderSettings = {
   fontSize: 16,
+  displayFormat: 'json',
   ...DEFAULT_READING_KEYS,
   density: 'comfortable',
   showChapterTitles: false,
@@ -83,7 +119,8 @@ export function readSettings(): ReaderSettings {
   try {
     const saved = JSON.parse(localStorage.getItem('workbench-settings') ?? '{}');
     return {
-      fontSize: typeof saved.fontSize === 'number' ? Math.max(13, Math.min(22, saved.fontSize)) : 16,
+      fontSize: typeof saved.fontSize === 'number' && Number.isFinite(saved.fontSize) ? Math.max(13, Math.min(22, saved.fontSize)) : 16,
+      displayFormat: isDisplayFormat(saved.displayFormat) ? saved.displayFormat : 'json',
       ...normalizeReadingKeys(saved.readingKey, saved.previousReadingKey),
       // Version 2 replaces uniform padding with varied reading blocks. Existing
       // installations start with the new reading-first layout, keeping all
